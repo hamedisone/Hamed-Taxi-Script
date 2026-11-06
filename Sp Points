@@ -1,0 +1,379 @@
+// ==UserScript==
+// @name         ماشین حساب پوینت اس پی آلپارو
+// @namespace    local.transportationdepartment.sp
+// @version      1.0.0
+// @description  Extracts and ranks members in the weekly SP points sections and copies the result.
+// @match        https://transportationdepartment.ir/divisions/sp/weekly-points*
+// @run-at       document-idle
+// @grant        none
+// ==/UserScript==
+
+(function () {
+  "use strict";
+
+  const TARGET_PATH = "/divisions/sp/weekly-points";
+  const PANEL_ID = "sp-weekly-points-ranking-panel";
+  const STYLE_ID = "sp-weekly-points-ranking-style";
+  const GROUPS = [
+    { key: "SP", title: "SP", emoji: "🟣", prize: "۴۰۰٬۰۰۰ دلار" },
+    { key: "SPT", title: "SPT", emoji: "🔵", prize: "۳۰۰٬۰۰۰ دلار" },
+    { key: "HELPER", title: "Helper", emoji: "🟢", prize: "۱۵۰٬۰۰۰ دلار" },
+    { key: "BACKUP", title: "Backup", emoji: "🟠", prize: "۱۵۰٬۰۰۰ دلار" },
+  ];
+
+  function toLatinDigits(value) {
+    return value
+      .replace(/[۰-۹]/g, (digit) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(digit)))
+      .replace(/[٠-٩]/g, (digit) => String("٠١٢٣٤٥٦٧٨٩".indexOf(digit)));
+  }
+
+  function cleanText(value) {
+    return (value || "").replace(/\s+/g, " ").trim();
+  }
+
+  function findRankingCard() {
+    return Array.from(document.querySelectorAll("section.sp-v8-card")).find((card) =>
+      cleanText(card.querySelector(".sp-v8-card-title")?.textContent) === "خلاصه رنک‌ها",
+    );
+  }
+
+  function parseMember(row) {
+    const name = cleanText(row.querySelector(".sp-v8-list-main > strong")?.textContent);
+    const pointText = cleanText(row.querySelector(".sp-v8-list-meta strong")?.textContent);
+    const pointMatch = toLatinDigits(pointText).match(/([\d,٬]+)\s*P\b/i);
+    if (!name || !pointMatch) {
+      return null;
+    }
+
+    const points = Number(pointMatch[1].replace(/[,٬]/g, ""));
+    if (!Number.isFinite(points)) {
+      return null;
+    }
+
+    const info = cleanText(row.querySelector(".sp-v8-list-main > small")?.textContent);
+    const firstInfo = info.split("·", 1)[0].trim();
+    const identifier = /^[A-Z0-9]+-\d+$/i.test(firstInfo) ? firstInfo : "";
+    return { name, points, identifier };
+  }
+
+  function parseGroup(details, group) {
+    const list = details.querySelector(".sp-v8-details-body .sp-v8-list");
+    const members = list
+      ? Array.from(list.querySelectorAll(".sp-v8-list-row"))
+          .map(parseMember)
+          .filter(Boolean)
+      : [];
+
+    return {
+      ...group,
+      members: members
+        .map((member, index) => ({ ...member, order: index }))
+        .sort((a, b) => b.points - a.points || a.order - b.order),
+    };
+  }
+
+  function extractRanking() {
+    const card = findRankingCard();
+    if (!card) {
+      throw new Error("کارت «خلاصه رنک‌ها» در صفحه پیدا نشد.");
+    }
+
+    const grid = card.querySelector(".sp-v8-grid-2");
+    const rankCards = grid
+      ? Array.from(grid.querySelectorAll("details.sp-v8-details"))
+      : [];
+    const parsedCards = rankCards.map((details) => {
+      const summaryText = cleanText(details.querySelector(":scope > summary")?.textContent);
+      const match = summaryText.match(/^\s*(SPT|SP|Helper|Backup)(?=\s|$)/i);
+      if (!match) {
+        return null;
+      }
+      const key = match[1].toUpperCase();
+      const group = GROUPS.find((item) => item.key === key);
+      return group ? parseGroup(details, group) : null;
+    });
+
+    const groups = GROUPS.map((group) =>
+      parsedCards.find((candidate) => candidate?.key === group.key) ||
+      { ...group, members: [] },
+    );
+    if (!groups.some((group) => group.members.length > 0)) {
+      throw new Error("هیچ عضو دارای پوینتی در چهار بخش SP، SPT، Helper و Backup پیدا نشد.");
+    }
+    return groups;
+  }
+
+  function getWeekRange() {
+    const text = cleanText(
+      document.querySelector("section.sp-v8-pagebar .sp-v8-pagebar-copy > p")?.textContent,
+    );
+    const match = text.match(
+      /جمعه\s+[\d۰-۹٠-٩]{4}\/[\d۰-۹٠-٩]{1,2}\/[\d۰-۹٠-٩]{1,2}\s+تا\s+پنج‌شنبه\s+[\d۰-۹٠-٩]{4}\/[\d۰-۹٠-٩]{1,2}\/[\d۰-۹٠-٩]{1,2}/,
+    );
+    if (!match) {
+      throw new Error("بازهٔ تاریخ هفتگی از سربرگ صفحه پیدا نشد.");
+    }
+    return match[0];
+  }
+
+  function getGroupWinners(groups) {
+    return groups
+      .filter((group) => group.members.length > 0)
+      .map((group) => ({ group, member: group.members[0] }));
+  }
+
+  function formatActivityList(groups, weekRange) {
+    const lines = ["🏆 رتبه‌بندی پوینت هفتگی", weekRange, ""];
+    const medals = ["🥇", "🥈", "🥉"];
+
+    groups.forEach((group, groupIndex) => {
+      if (groupIndex > 0) {
+        lines.push("");
+      }
+      lines.push(`${group.emoji} ${group.title} :`);
+      if (group.members.length === 0) {
+        lines.push("— عضوی در این بخش پیدا نشد");
+        return;
+      }
+
+      group.members.forEach((member, index) => {
+        const rank = medals[index] || `${index + 1}.`;
+        lines.push(
+          `${rank} ${member.identifier ? `[${member.identifier}] ` : ""}${member.name} — ${member.points} Point`,
+        );
+      });
+    });
+
+    lines.push("", "⭐ نفرات برتر هر بخش");
+    const winnerRanks = ["🥇", "🥈", "🥉", "🏅"];
+    getGroupWinners(groups).forEach(({ member }, index) => {
+      lines.push(`${winnerRanks[index]} ${member.name} — ${member.points} Point`);
+    });
+
+    lines.push("", "⚠️ لو اکتیویتی‌های این هفته");
+    const lowActivityGroups = groups
+      .map((group) => ({
+        ...group,
+        members: group.members.filter((member) => member.points > 0 && member.points < 85),
+      }))
+      .filter((group) => group.members.length > 0);
+    if (lowActivityGroups.length === 0) {
+      lines.push("— موردی ندارد");
+    }
+
+    lowActivityGroups.forEach((group) => {
+      lines.push(`📌 ${group.title} :`);
+      const lowActivityMembers = group.members;
+      lowActivityMembers.forEach((member) => {
+        lines.push(
+          `• ${member.identifier ? `[${member.identifier}] ` : ""}${member.name} — ${member.points} Point`,
+        );
+      });
+    });
+
+    lines.push("", "⚫ اعضای غیرفعال");
+    const inactiveGroups = groups
+      .map((group) => ({
+        ...group,
+        members: group.members.filter((member) => member.points === 0),
+      }))
+      .filter((group) => group.members.length > 0);
+    if (inactiveGroups.length === 0) {
+      lines.push("— موردی ندارد");
+    }
+
+    inactiveGroups.forEach((group) => {
+      lines.push(`📌 ${group.title} :`);
+      group.members.forEach((member) => {
+        lines.push(
+          `• ${member.identifier ? `[${member.identifier}] ` : ""}${member.name} — ${member.points} Point`,
+        );
+      });
+    });
+
+    return lines.join("\n");
+  }
+
+  function formatPerformanceReport(groups, weekRange) {
+    if (!groups.some((group) => group.members.length > 0)) {
+      throw new Error("برای تهیهٔ گزارش عملکرد، برنده‌ای در بخش‌ها پیدا نشد.");
+    }
+
+    const lines = [
+      "*📊 گزارش عملکرد و پوینت‌های هفتگی دیویژن سوپروایزر (SP)*",
+      "",
+      `پاداش و پوینت‌های اعضای محترم در بازه زمانی ${weekRange} محاسبه و اعمال شد. ✅`,
+      "",
+      "📌 برای مشاهده جزئیات پوینت‌های خود، لطفاً وارد *سایت تاکسیرانی* شده و از طریق بخش *داشبورد* پوینت‌های خود را بررسی کنید:",
+      "",
+      "🌐 [ورود به سایت تاکسیرانی](https://transportationdepartment.ir/)",
+      "",
+      "---",
+      "",
+      "*🏆 برترین‌های هفته (Top of the Week):*",
+      "",
+    ];
+
+    groups.forEach((group) => {
+      lines.push(`📌 *بخش ${group.title}:*`);
+      if (group.members.length > 0) {
+        const leader = group.members[0];
+        lines.push(
+          `🥇 *برترین عضو:* ${leader.name} | ${new Intl.NumberFormat("fa-IR").format(leader.points)} پوینت`,
+          `💰 *پاداش: ${group.prize}*`,
+        );
+      } else {
+        lines.push("— عضوی در این بخش پیدا نشد");
+      }
+      lines.push("");
+    });
+
+    lines.push(
+      "---",
+      "",
+      "*🎁 نحوه دریافت پاداش:*",
+      "",
+      "به نفرات برتر هر بخش، جوایز نقدی ذکرشده تعلق می‌گیرد. 💵",
+      "",
+      "برای دریافت جایزه، لطفاً به آیدی زیر پیام دهید تا هماهنگی‌های لازم جهت پرداخت پاداش انجام شود:",
+      "",
+      "📩 لیدر دیویژن: @MahdiKrALM",
+      "",
+      "🔗 https://ble.ir/MahdiKrALM",
+      "",
+      "از تلاش، فعالیت و عملکرد تمامی اعضای محترم در این هفته صمیمانه سپاسگزاریم. 🌹",
+      "",
+      "*با آرزوی موفقیت برای همه اعضای دیویژن SP* 🏆",
+    );
+
+    return lines.join("\n");
+  }
+
+  function addStyles() {
+    if (document.getElementById(STYLE_ID)) {
+      return;
+    }
+    const style = document.createElement("style");
+    style.id = STYLE_ID;
+    style.textContent = `
+      #${PANEL_ID} {
+        box-sizing: border-box;
+        position: fixed;
+        z-index: 2147483647;
+        right: 16px;
+        bottom: 16px;
+        width: max-content;
+        min-width: 220px;
+        max-width: calc(100vw - 32px);
+        padding: 14px;
+        border: 1px solid #3f3f46;
+        border-radius: 12px;
+        background: #09090b;
+        color: #f4f4f5;
+        box-shadow: 0 8px 30px #0009;
+        font: 14px/1.7 sans-serif;
+        direction: rtl;
+      }
+      #${PANEL_ID} strong { display: block; margin-bottom: 5px; }
+      #${PANEL_ID} button {
+        padding: 7px 12px;
+        border: 1px solid #52525b;
+        border-radius: 7px;
+        background: #18181b;
+        color: #e4e4e7;
+        cursor: pointer;
+        font: inherit;
+        transition: background .2s, border-color .2s;
+      }
+      #${PANEL_ID} button:hover:not(:disabled) {
+        background: #27272a;
+        border-color: #71717a;
+      }
+      #${PANEL_ID} [data-copy] { border-color: #2563eb; background: #1d4ed8; color: #fff; }
+      #${PANEL_ID} [data-copy]:hover:not(:disabled) { background: #1e40af; border-color: #3b82f6; }
+      #${PANEL_ID} [data-report] { border-color: #15803d; background: #166534; color: #fff; }
+      #${PANEL_ID} [data-report]:hover:not(:disabled) { background: #14532d; border-color: #22c55e; }
+      #${PANEL_ID} button:disabled { cursor: wait; opacity: .6; }
+    `;
+    document.head.append(style);
+  }
+
+  function createPanel() {
+    addStyles();
+    const panel = document.createElement("aside");
+    panel.id = PANEL_ID;
+    panel.setAttribute("aria-label", "رتبه‌بندی پوینت هفتگی");
+
+    const heading = document.createElement("strong");
+    heading.textContent = "🏆 رتبه‌بندی پوینت هفتگی";
+
+    const copyButton = document.createElement("button");
+    copyButton.type = "button";
+    copyButton.dataset.copy = "";
+    copyButton.textContent = "📋 کپی آمار فعالیت هفتگی";
+
+    const reportButton = document.createElement("button");
+    reportButton.type = "button";
+    reportButton.dataset.report = "";
+    reportButton.textContent = "📊 گزارش عملکرد";
+
+    panel.append(heading, copyButton, reportButton);
+    document.body.append(panel);
+    return { copyButton, reportButton };
+  }
+
+  async function copyText(text) {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+
+    const temporary = document.createElement("textarea");
+    temporary.value = text;
+    temporary.setAttribute("readonly", "");
+    temporary.style.cssText = "position:fixed;left:-9999px;top:0";
+    document.body.append(temporary);
+    temporary.select();
+    const copied = document.execCommand("copy");
+    temporary.remove();
+    if (!copied) {
+      throw new Error("مرورگر اجازهٔ کپی به کلیپ‌بورد را نداد.");
+    }
+  }
+
+  function start() {
+    if (location.pathname.replace(/\/+$/, "") !== TARGET_PATH) {
+      return;
+    }
+    if (document.getElementById(PANEL_ID)) {
+      return;
+    }
+
+    const ui = createPanel();
+    async function copyGeneratedText(button, formatter, errorMessage) {
+      button.disabled = true;
+      try {
+        const groups = extractRanking();
+        const text = formatter(groups, getWeekRange());
+        await copyText(text);
+      } catch (error) {
+        window.alert(error instanceof Error ? error.message : errorMessage);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    ui.copyButton.addEventListener("click", () =>
+      copyGeneratedText(ui.copyButton, formatActivityList, "کپی آمار فعالیت ناموفق بود."),
+    );
+    ui.reportButton.addEventListener("click", () =>
+      copyGeneratedText(
+        ui.reportButton,
+        formatPerformanceReport,
+        "کپی گزارش عملکرد ناموفق بود.",
+      ),
+    );
+  }
+
+  start();
+})();
